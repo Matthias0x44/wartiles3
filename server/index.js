@@ -22,6 +22,19 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
 
+// Set up logging
+const logDebug = (...args) => {
+  console.log(`[${new Date().toISOString()}] [DEBUG]`, ...args);
+};
+
+const logInfo = (...args) => {
+  console.log(`[${new Date().toISOString()}] [INFO]`, ...args);
+};
+
+const logError = (...args) => {
+  console.error(`[${new Date().toISOString()}] [ERROR]`, ...args);
+};
+
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
@@ -41,15 +54,67 @@ const activeGames = new Map();
 // Store players by socket id
 const players = new Map();
 
+// Store player to game mapping
+const playerGameMap = new Map();
+
 io.on('connection', (socket) => {
-  console.log(`User connected: ${socket.id} (transport: ${socket.conn.transport.name})`);
+  logInfo(`User connected: ${socket.id} (transport: ${socket.conn.transport.name})`);
+  
+  // Check if the player was in a game before and try to reconnect them
+  socket.on('reconnect_to_game', (data) => {
+    const { playerId, gameId } = data;
+    logInfo(`Player ${playerId} attempting to reconnect to game ${gameId}`);
+    
+    const game = activeGames.get(gameId);
+    if (game) {
+      // Update player's socket id in the game
+      const playerIndex = game.players.findIndex(p => p.id === playerId);
+      if (playerIndex !== -1) {
+        logInfo(`Reconnecting player ${playerId} to game ${gameId}`);
+        
+        // Update player's socket id
+        game.players[playerIndex].id = socket.id;
+        
+        // Update player's info in our maps
+        const playerInfo = players.get(playerId);
+        if (playerInfo) {
+          playerInfo.id = socket.id;
+          players.delete(playerId);
+          players.set(socket.id, playerInfo);
+        }
+        
+        // Update player game mapping
+        playerGameMap.delete(playerId);
+        playerGameMap.set(socket.id, gameId);
+        
+        // Add socket to game room
+        socket.join(gameId);
+        
+        // Send current game state to reconnected player
+        socket.emit('game_state_update', { gameId, state: game.state });
+        
+        // Notify other players
+        socket.to(gameId).emit('player_reconnected', { 
+          oldId: playerId, 
+          newId: socket.id,
+          players: game.players
+        });
+      } else {
+        logInfo(`Player ${playerId} not found in game ${gameId}`);
+        socket.emit('reconnect_failed', { message: 'Player not found in this game' });
+      }
+    } else {
+      logInfo(`Game ${gameId} not found for reconnection`);
+      socket.emit('reconnect_failed', { message: 'Game not found' });
+    }
+  });
   
   // Handle player joining a game lobby
   socket.on('join_lobby', (data) => {
     const { playerName, faction } = data;
     const playerId = socket.id;
     
-    console.log(`Player ${playerName} attempting to join lobby as ${faction}`);
+    logInfo(`Player ${playerName} attempting to join lobby as ${faction}`);
     
     // Create player
     const player = {
@@ -72,19 +137,19 @@ io.on('connection', (socket) => {
     // Broadcast updated player list to all in lobby
     io.to('lobby').emit('lobby_update', { players: lobbyPlayers });
     
-    console.log(`${playerName} joined the lobby as ${faction}. Total players in lobby: ${lobbyPlayers.length}`);
-    console.log(`Current lobby players: ${JSON.stringify(lobbyPlayers.map(p => p.name))}`);
+    logInfo(`${playerName} joined the lobby as ${faction}. Total players in lobby: ${lobbyPlayers.length}`);
+    logInfo(`Current lobby players: ${JSON.stringify(lobbyPlayers.map(p => p.name))}`);
   });
   
   // Add a ping handler to check if connection is alive
   socket.on('ping', () => {
-    console.log(`Received ping from ${socket.id}`);
+    logDebug(`Received ping from ${socket.id}`);
     socket.emit('pong');
   });
   
   // Log when client connects to different namespaces
   socket.use(([event, ...args], next) => {
-    console.log(`Socket ${socket.id} event: ${event}`, args);
+    logDebug(`Socket ${socket.id} event: ${event}`, JSON.stringify(args));
     next();
   });
   
@@ -99,7 +164,7 @@ io.on('connection', (socket) => {
       const lobbyPlayers = Array.from(players.values());
       io.to('lobby').emit('lobby_update', { players: lobbyPlayers });
       
-      console.log(`${player.name} is ${player.isReady ? 'ready' : 'not ready'}`);
+      logInfo(`${player.name} is ${player.isReady ? 'ready' : 'not ready'}`);
     }
   });
   
@@ -109,15 +174,26 @@ io.on('connection', (socket) => {
     const lobbyPlayers = Array.from(players.values());
     const allReady = lobbyPlayers.length >= 2 && lobbyPlayers.every(p => p.isReady);
     
+    logInfo(`Start game requested by ${socket.id}, all players ready: ${allReady}`);
+    
     if (allReady) {
       // Create a unique game ID
       const gameId = 'game-' + Date.now();
+      
+      // Create initial game state
+      const initialState = createInitialGameState(lobbyPlayers);
       
       // Add all players to the game
       activeGames.set(gameId, {
         id: gameId,
         players: lobbyPlayers,
-        state: createInitialGameState(lobbyPlayers)
+        state: initialState,
+        createdAt: Date.now()
+      });
+      
+      // Store player to game mapping
+      lobbyPlayers.forEach(player => {
+        playerGameMap.set(player.id, gameId);
       });
       
       // Move all players from lobby to game room
@@ -133,10 +209,15 @@ io.on('connection', (socket) => {
       io.to(gameId).emit('game_started', { 
         gameId, 
         players: lobbyPlayers,
-        state: activeGames.get(gameId).state
+        state: initialState
       });
       
-      console.log(`Game ${gameId} started with ${lobbyPlayers.length} players`);
+      logInfo(`Game ${gameId} started with ${lobbyPlayers.length} players`);
+      logInfo(`Initial game state: ${JSON.stringify(initialState)}`);
+    } else {
+      // Notify the player that not everyone is ready
+      socket.emit('game_start_failed', { message: 'Not all players are ready' });
+      logInfo('Game start failed: Not all players are ready');
     }
   });
   
@@ -145,15 +226,45 @@ io.on('connection', (socket) => {
     const { gameId, action } = data;
     const game = activeGames.get(gameId);
     
-    if (game) {
+    if (!game) {
+      logError(`Game action received for non-existent game: ${gameId}`);
+      socket.emit('error', { message: 'Game not found' });
+      return;
+    }
+    
+    logInfo(`Game ${gameId} action received: ${action.type} from player ${socket.id}`);
+    
+    try {
       // Update game state based on action
-      // This would implement your game logic
-      updateGameState(game, action);
+      const updatedState = updateGameState(game, action);
+      game.state = updatedState;
       
-      // Broadcast updated game state to all players
-      io.to(gameId).emit('game_update', { state: game.state });
+      // Broadcast updated game state to all players EXCEPT the sender
+      socket.to(gameId).emit('game_update', { 
+        type: action.type,
+        state: updatedState, 
+        action: action
+      });
       
-      console.log(`Game ${gameId} action: ${action.type}`);
+      // Send acknowledgment to the sender
+      socket.emit('action_processed', { 
+        success: true, 
+        type: action.type,
+        state: updatedState 
+      });
+      
+      logInfo(`Game ${gameId} state updated after action: ${action.type}`);
+      
+      // Check for game end conditions
+      if (updatedState.isGameOver) {
+        endGame(game);
+      }
+    } catch (error) {
+      logError(`Error processing game action: ${error.message}`);
+      socket.emit('action_failed', { 
+        message: 'Failed to process action', 
+        error: error.message 
+      });
     }
   });
   
@@ -162,7 +273,12 @@ io.on('connection', (socket) => {
     const player = players.get(socket.id);
     
     if (player) {
-      console.log(`Player disconnected: ${player.name}`);
+      logInfo(`Player disconnected: ${player.name} (${socket.id})`);
+      
+      // Store player info for potential reconnections
+      const playerInfo = { ...player };
+      
+      // Remove from active players
       players.delete(socket.id);
       
       // Update lobby if player was there
@@ -170,30 +286,62 @@ io.on('connection', (socket) => {
       io.to('lobby').emit('lobby_update', { players: lobbyPlayers });
       
       // Check if player was in a game
-      activeGames.forEach((game, gameId) => {
-        const playerIndex = game.players.findIndex(p => p.id === socket.id);
+      const gameId = playerGameMap.get(socket.id);
+      if (gameId) {
+        const game = activeGames.get(gameId);
         
-        if (playerIndex !== -1) {
-          // Remove player from game
-          game.players.splice(playerIndex, 1);
+        if (game) {
+          logInfo(`Player ${player.name} disconnected from game ${gameId}`);
           
-          if (game.players.length === 0) {
-            // If no players left, remove the game
-            activeGames.delete(gameId);
-            console.log(`Game ${gameId} ended - no players left`);
-          } else {
+          // Don't remove player from game immediately, wait for potential reconnection
+          // Instead, mark them as disconnected
+          const playerIndex = game.players.findIndex(p => p.id === socket.id);
+          if (playerIndex !== -1) {
+            game.players[playerIndex].disconnected = true;
+            game.players[playerIndex].disconnectedAt = Date.now();
+            
             // Notify remaining players
-            io.to(gameId).emit('player_left', { 
+            io.to(gameId).emit('player_disconnected', { 
               playerId: socket.id,
-              players: game.players,
-              state: game.state
+              playerName: player.name,
+              players: game.players
             });
+            
+            // Start a timer to remove player if they don't reconnect
+            setTimeout(() => {
+              const updatedGame = activeGames.get(gameId);
+              if (updatedGame) {
+                const playerStillDisconnected = updatedGame.players.find(
+                  p => p.id === socket.id && p.disconnected
+                );
+                
+                if (playerStillDisconnected) {
+                  logInfo(`Player ${player.name} didn't reconnect, removing from game ${gameId}`);
+                  
+                  // Remove player from game
+                  updatedGame.players = updatedGame.players.filter(p => p.id !== socket.id);
+                  
+                  if (updatedGame.players.length === 0) {
+                    // If no players left, remove the game
+                    activeGames.delete(gameId);
+                    logInfo(`Game ${gameId} ended - no players left`);
+                  } else {
+                    // Notify remaining players
+                    io.to(gameId).emit('player_left', { 
+                      playerId: socket.id,
+                      playerName: player.name,
+                      players: updatedGame.players
+                    });
+                  }
+                }
+              }
+            }, 60000); // Wait 1 minute for reconnection
           }
         }
-      });
+      }
     }
     
-    console.log(`User disconnected: ${socket.id}`);
+    logInfo(`User disconnected: ${socket.id}`);
   });
 });
 
@@ -213,7 +361,6 @@ function getFactionColor(faction) {
 
 function createInitialGameState(players) {
   // Create initial game state with random starting positions for each player
-  // This would implement your game initialization logic
   return {
     // Basic game state structure - would need to be expanded
     gridSize: 25,
@@ -250,7 +397,10 @@ function createEmptyGrid(size, players) {
       // Check if position is free
       if (grid[y][x].owner === null) {
         grid[y][x].owner = player.id;
+        grid[y][x].unitValue = 10; // Set initial defense value
         assigned = true;
+        
+        logInfo(`Player ${player.name} assigned starting position at (${x}, ${y})`);
       }
     }
   });
@@ -259,23 +409,128 @@ function createEmptyGrid(size, players) {
 }
 
 function updateGameState(game, action) {
+  // Clone the current state to avoid direct mutations
+  const state = JSON.parse(JSON.stringify(game.state));
+  
   // Implement game logic based on action
   switch (action.type) {
     case 'ANNEX_TILE':
       // Logic for annexing a tile
+      logInfo(`Processing ANNEX_TILE action: ${JSON.stringify(action.payload)}`);
+      annexTile(state, action.payload);
       break;
+      
     case 'BUILD_STRUCTURE':
       // Logic for building a structure
+      logInfo(`Processing BUILD_STRUCTURE action: ${JSON.stringify(action.payload)}`);
+      buildStructure(state, action.payload);
       break;
+      
     case 'TICK_TIMER':
       // Update game timer
-      game.state.timeRemaining--;
-      if (game.state.timeRemaining <= 0) {
-        endGame(game);
+      state.timeRemaining--;
+      if (state.timeRemaining <= 0) {
+        state.isGameOver = true;
       }
       break;
+      
+    case 'OCCUPY_TILE':
+      // Logic for occupying an opponent's tile
+      logInfo(`Processing OCCUPY_TILE action: ${JSON.stringify(action.payload)}`);
+      occupyTile(state, action.payload);
+      break;
+      
     // Add other action types as needed
+    default:
+      logInfo(`Unknown action type: ${action.type}`);
   }
+  
+  return state;
+}
+
+// Helper functions for specific game actions
+function annexTile(state, payload) {
+  const { playerId, x, y } = payload;
+  
+  // Validate action
+  if (x < 0 || x >= state.gridSize || y < 0 || y >= state.gridSize) {
+    throw new Error('Invalid tile coordinates');
+  }
+  
+  if (state.grid[y][x].owner !== null) {
+    throw new Error('Tile already owned');
+  }
+  
+  const player = state.players.find(p => p.id === playerId);
+  if (!player) {
+    throw new Error('Player not found');
+  }
+  
+  // Set the owner of the tile
+  state.grid[y][x].owner = playerId;
+  state.grid[y][x].unitValue = 10; // Base defense value
+  
+  logInfo(`Player ${player.name} annexed tile at (${x}, ${y})`);
+  
+  return state;
+}
+
+function buildStructure(state, payload) {
+  const { playerId, x, y, structure } = payload;
+  
+  // Validate action
+  if (x < 0 || x >= state.gridSize || y < 0 || y >= state.gridSize) {
+    throw new Error('Invalid tile coordinates');
+  }
+  
+  const tile = state.grid[y][x];
+  if (tile.owner !== playerId) {
+    throw new Error('Tile not owned by player');
+  }
+  
+  if (tile.structure !== null) {
+    throw new Error('Tile already has a structure');
+  }
+  
+  // Build the structure
+  state.grid[y][x].structure = structure;
+  
+  // Adjust unit value if it's a defense structure
+  if (structure.type === 'Defence') {
+    state.grid[y][x].unitValue += 40;
+  }
+  
+  logInfo(`Player ${playerId} built ${structure.type} at (${x}, ${y})`);
+  
+  return state;
+}
+
+function occupyTile(state, payload) {
+  const { playerId, x, y } = payload;
+  
+  // Validate action
+  if (x < 0 || x >= state.gridSize || y < 0 || y >= state.gridSize) {
+    throw new Error('Invalid tile coordinates');
+  }
+  
+  const tile = state.grid[y][x];
+  if (tile.owner === null || tile.owner === playerId) {
+    throw new Error('Invalid occupation target');
+  }
+  
+  // Occupy the tile
+  const previousOwner = tile.owner;
+  state.grid[y][x].owner = playerId;
+  state.grid[y][x].unitValue = 10; // Reset defense value
+  
+  // Remove the structure if there was one
+  if (tile.structure !== null) {
+    state.grid[y][x].structure = null;
+  }
+  
+  logInfo(`Player ${playerId} occupied tile at (${x}, ${y}) from player ${previousOwner}`);
+  
+  return state;
 }
 
 function endGame(game) {
@@ -308,10 +563,12 @@ function endGame(game) {
     winner: winner,
     state: game.state
   });
+  
+  logInfo(`Game ${game.id} ended. Winner: ${winner ? winner.name : 'None'}`);
 }
 
 // Start server
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Socket.io server ready for connections`);
+  logInfo(`Server running on port ${PORT}`);
+  logInfo(`Socket.io server ready for connections`);
 }); 

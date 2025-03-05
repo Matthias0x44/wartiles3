@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useReducer, ReactNode, useEffect } from 'react';
+import React, { createContext, useContext, useReducer, ReactNode, useEffect, useCallback } from 'react';
 import { Faction, GameState, GRID_SIZE, Player, Tile, GAME_DURATION, Structure, MIN_DISTANCE, StructureType, STRUCTURES } from '../types';
+import { getSocket } from '../utils/socket';
 
 // Initial game state
 const initialState: GameState = {
@@ -36,7 +37,8 @@ type Action =
   | { type: 'ADD_AI_PLAYER'; payload: { faction: Faction } }
   | { type: 'END_GAME'; payload: { winner: Player | null } }
   | { type: 'RESET_GAME' }
-  | { type: 'SET_PLAYERS'; payload: { players: Array<{ id: string, name: string, faction: Faction, isReady: boolean, color: string }> } };
+  | { type: 'SET_PLAYERS'; payload: { players: Array<{ id: string, name: string, faction: Faction, isReady: boolean, color: string }> } }
+  | { type: 'SET_SERVER_STATE'; payload: { serverState: GameState, gameId?: string, players?: Player[] } };
 
 // Helper functions
 const calculateDistance = (x1: number, y1: number, x2: number, y2: number): number => {
@@ -601,6 +603,14 @@ const gameReducer = (state: GameState, action: Action): GameState => {
         })
       };
       
+    case 'SET_SERVER_STATE':
+      return {
+        ...state,
+        ...action.payload.serverState,
+        gameId: action.payload.gameId,
+        players: action.payload.players || state.players
+      };
+      
     default:
       return state;
   }
@@ -621,6 +631,95 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   // Store the dispatch function for AI moves
   store = { dispatch };
   
+  // Get socket instance
+  const socket = getSocket();
+  
+  // Handle socket events for multiplayer game state sync
+  useEffect(() => {
+    // When a game starts, update the local state with server state
+    socket.on('game_started', (data) => {
+      console.log('Game started from server:', data);
+      
+      // Update local state with server state
+      dispatch({ 
+        type: 'SET_SERVER_STATE', 
+        payload: { 
+          serverState: data.state,
+          gameId: data.gameId,
+          players: data.players
+        } 
+      });
+    });
+    
+    // When game state is updated by another player
+    socket.on('game_update', (data) => {
+      console.log('Game state update from server:', data);
+      
+      // Update local state with server state
+      dispatch({ 
+        type: 'SET_SERVER_STATE', 
+        payload: { 
+          serverState: data.state 
+        } 
+      });
+    });
+    
+    // When rejoining a game
+    socket.on('game_state_update', (data) => {
+      console.log('Reconnected to game, state update:', data);
+      
+      // Update local state with server state
+      dispatch({ 
+        type: 'SET_SERVER_STATE', 
+        payload: { 
+          serverState: data.state,
+          gameId: data.gameId
+        } 
+      });
+    });
+    
+    return () => {
+      socket.off('game_started');
+      socket.off('game_update');
+      socket.off('game_state_update');
+    };
+  }, []);
+  
+  // Function to emit actions to the server
+  const emitGameAction = useCallback((action: Action) => {
+    if (!state.gameId) {
+      console.error('No game ID available for emitting actions');
+      return;
+    }
+    
+    console.log('Emitting game action to server:', action);
+    socket.emit('game_action', { 
+      gameId: state.gameId, 
+      action 
+    });
+  }, [state.gameId]);
+  
+  // Extended dispatch that sends actions to server
+  const dispatchWithSocket = useCallback((action: Action) => {
+    // First update local state
+    dispatch(action);
+    
+    // Then send to server if it's a multiplayer game and relevant action type
+    if (state.gameId && !state.isSoloMode) {
+      const actionsToSync = [
+        'ANNEX_TILE', 
+        'BUILD_STRUCTURE', 
+        'DEMOLISH_STRUCTURE', 
+        'OCCUPY_TILE',
+        // Add other action types that need server sync
+      ];
+      
+      if (actionsToSync.includes(action.type)) {
+        emitGameAction(action);
+      }
+    }
+  }, [state.gameId, state.isSoloMode, emitGameAction]);
+  
   // Resource update effect (runs every second when game is active)
   useEffect(() => {
     if (!state.isGameStarted || state.isGameOver) return;
@@ -628,13 +727,18 @@ export const GameProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const interval = setInterval(() => {
       dispatch({ type: 'UPDATE_RESOURCES' });
       dispatch({ type: 'TICK_TIMER' });
+      
+      // In multiplayer, only send timer updates occasionally to reduce traffic
+      if (state.gameId && !state.isSoloMode && state.timeRemaining % 10 === 0) {
+        emitGameAction({ type: 'TICK_TIMER' });
+      }
     }, 1000);
     
     return () => clearInterval(interval);
-  }, [state.isGameStarted, state.isGameOver]);
+  }, [state.isGameStarted, state.isGameOver, state.gameId, state.isSoloMode, state.timeRemaining, emitGameAction]);
   
   return (
-    <GameContext.Provider value={{ state, dispatch }}>
+    <GameContext.Provider value={{ state, dispatch: dispatchWithSocket }}>
       {children}
     </GameContext.Provider>
   );
