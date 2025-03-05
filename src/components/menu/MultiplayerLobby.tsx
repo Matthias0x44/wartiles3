@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import styled from 'styled-components';
 import { useNavigate } from 'react-router-dom';
 import { useGame } from '../../context/GameContext';
 import { Faction } from '../../types';
+import { getSocket, joinLobby, toggleReady as emitToggleReady, startGame as emitStartGame } from '../../utils/socket';
 
 const LobbyContainer = styled.div`
   display: flex;
@@ -204,6 +205,41 @@ const BackToMenuButton = styled.button`
   }
 `;
 
+const ConnectionStatus = styled.div<{ connected: boolean }>`
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background-color: ${props => props.connected ? '#4CAF50' : '#f44336'};
+  color: white;
+  font-size: 0.9rem;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+`;
+
+const StatusIndicator = styled.div<{ connected: boolean }>`
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: ${props => props.connected ? '#4CAF50' : '#f44336'};
+  margin-right: 8px;
+`;
+
+const DebugInfo = styled.div`
+  position: fixed;
+  bottom: 10px;
+  right: 10px;
+  padding: 10px;
+  background-color: rgba(0, 0, 0, 0.7);
+  color: white;
+  font-size: 0.8rem;
+  max-width: 300px;
+  border-radius: 4px;
+  z-index: 1000;
+`;
+
 const MultiplayerLobby: React.FC = () => {
   const navigate = useNavigate();
   const { state, dispatch } = useGame();
@@ -211,39 +247,110 @@ const MultiplayerLobby: React.FC = () => {
   const [selectedFaction, setSelectedFaction] = useState<Faction | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [hasJoined, setHasJoined] = useState(false);
+  const [lobbyPlayers, setLobbyPlayers] = useState<any[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const [socketId, setSocketId] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   
-  const currentPlayer = state.players.length > 0 ? state.players[0] : null;
-  const allPlayersReady = state.players.length >= 2 && state.players.every(p => p.isReady);
+  useEffect(() => {
+    // Initialize socket connection when component mounts
+    const socket = getSocket();
+    
+    // Check if already connected
+    if (socket.connected) {
+      setIsConnected(true);
+      setSocketId(socket.id);
+    }
+    
+    // Connection events
+    socket.on('connect', () => {
+      console.log('[Lobby] Socket connected:', socket.id);
+      setIsConnected(true);
+      setSocketId(socket.id);
+      setConnectionError(null);
+      
+      // Send a ping to verify connection is working
+      socket.emit('ping');
+    });
+    
+    socket.on('disconnect', (reason) => {
+      console.log('[Lobby] Socket disconnected:', reason);
+      setIsConnected(false);
+      setConnectionError(`Disconnected: ${reason}`);
+    });
+    
+    socket.on('connect_error', (error) => {
+      console.error('[Lobby] Socket connection error:', error.message);
+      setIsConnected(false);
+      setConnectionError(`Connection error: ${error.message}`);
+    });
+    
+    // Listen for lobby updates
+    socket.on('lobby_update', (data) => {
+      console.log('[Lobby] Lobby update received:', data);
+      setLobbyPlayers(data.players);
+      
+      // Update the game state with the players from the server
+      dispatch({
+        type: 'SET_PLAYERS',
+        payload: { players: data.players }
+      });
+    });
+    
+    // Listen for game start
+    socket.on('game_started', (data) => {
+      console.log('[Lobby] Game started:', data);
+      // Navigate to game screen
+      navigate('/game');
+    });
+    
+    // Listen for pong to verify connection
+    socket.on('pong', () => {
+      console.log('[Lobby] Received pong from server');
+    });
+    
+    // Setup a ping interval to keep connection alive
+    const pingInterval = setInterval(() => {
+      if (socket.connected) {
+        console.log('[Lobby] Sending ping to server');
+        socket.emit('ping');
+      }
+    }, 30000); // Every 30 seconds
+    
+    // Cleanup listeners when component unmounts
+    return () => {
+      socket.off('connect');
+      socket.off('disconnect');
+      socket.off('connect_error');
+      socket.off('lobby_update');
+      socket.off('game_started');
+      socket.off('pong');
+      clearInterval(pingInterval);
+    };
+  }, [dispatch, navigate]);
+  
+  const currentPlayer = lobbyPlayers.find(p => p.id === socketId) || null;
+  const allPlayersReady = lobbyPlayers.length >= 2 && lobbyPlayers.every(p => p.isReady);
   
   const handleJoinGame = () => {
     if (!playerName || !selectedFaction) return;
     
-    dispatch({
-      type: 'ADD_PLAYER',
-      payload: {
-        id: `player-${Date.now()}`,
-        name: playerName,
-        faction: selectedFaction
-      }
-    });
+    // Emit join_lobby event to the server
+    joinLobby(playerName, selectedFaction);
     
     setHasJoined(true);
   };
   
   const handleToggleReady = () => {
-    if (!currentPlayer) return;
-    
-    dispatch({
-      type: 'TOGGLE_READY',
-      payload: { playerId: currentPlayer.id }
-    });
+    // Emit toggle_ready event to the server
+    emitToggleReady();
     
     setIsReady(!isReady);
   };
   
   const handleStartGame = () => {
-    dispatch({ type: 'START_GAME' });
-    navigate('/game');
+    // Emit start_game event to the server
+    emitStartGame();
   };
   
   const getFactionColor = (faction: Faction): string => {
@@ -261,6 +368,11 @@ const MultiplayerLobby: React.FC = () => {
   
   return (
     <LobbyContainer>
+      <ConnectionStatus connected={isConnected}>
+        <StatusIndicator connected={isConnected} />
+        {isConnected ? 'Connected' : 'Disconnected'}
+      </ConnectionStatus>
+      
       <BackToMenuButton onClick={() => navigate('/')}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M19 12H5M5 12L12 19M5 12L12 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
@@ -359,12 +471,12 @@ const MultiplayerLobby: React.FC = () => {
         </PlayerSetupContainer>
         
         <PlayerList>
-          <h2>Players ({state.players.length}/3)</h2>
+          <h2>Players ({lobbyPlayers.length}/3)</h2>
           
-          {state.players.length === 0 ? (
+          {lobbyPlayers.length === 0 ? (
             <p>No players have joined yet.</p>
           ) : (
-            state.players.map(player => (
+            lobbyPlayers.map(player => (
               <PlayerCard 
                 key={player.id}
                 color={player.color}
@@ -380,15 +492,23 @@ const MultiplayerLobby: React.FC = () => {
             ))
           )}
           
-          {state.players.length < 3 && !hasJoined && (
+          {lobbyPlayers.length < 3 && !hasJoined && (
             <p>You can join this game!</p>
           )}
           
-          {state.players.length < 3 && hasJoined && (
+          {lobbyPlayers.length < 3 && hasJoined && (
             <p>Waiting for more players to join...</p>
           )}
         </PlayerList>
       </LobbyContent>
+      
+      {/* Debug information */}
+      <DebugInfo>
+        <div>Socket ID: {socketId || 'Not connected'}</div>
+        <div>Connection: {isConnected ? 'Connected' : 'Disconnected'}</div>
+        {connectionError && <div>Error: {connectionError}</div>}
+        <div>Players in lobby: {lobbyPlayers.length}</div>
+      </DebugInfo>
     </LobbyContainer>
   );
 };

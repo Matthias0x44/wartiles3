@@ -35,7 +35,8 @@ type Action =
   | { type: 'SET_SOLO_MODE'; payload: { isSolo: boolean, difficulty?: 'Easy' | 'Medium' | 'Hard' } }
   | { type: 'ADD_AI_PLAYER'; payload: { faction: Faction } }
   | { type: 'END_GAME'; payload: { winner: Player | null } }
-  | { type: 'RESET_GAME' };
+  | { type: 'RESET_GAME' }
+  | { type: 'SET_PLAYERS'; payload: { players: Array<{ id: string, name: string, faction: Faction, isReady: boolean, color: string }> } };
 
 // Helper functions
 const calculateDistance = (x1: number, y1: number, x2: number, y2: number): number => {
@@ -566,6 +567,39 @@ const gameReducer = (state: GameState, action: Action): GameState => {
       
     case 'RESET_GAME':
       return initialState;
+      
+    case 'SET_PLAYERS':
+      // Update players from the server
+      return {
+        ...state,
+        players: action.payload.players.map(serverPlayer => {
+          // Try to find existing player
+          const existingPlayer = state.players.find(p => p.id === serverPlayer.id);
+          
+          // If we have this player already, merge data
+          if (existingPlayer) {
+            return {
+              ...existingPlayer,
+              ...serverPlayer,
+            };
+          }
+          
+          // Otherwise create a new player object with default values
+          return {
+            id: serverPlayer.id,
+            name: serverPlayer.name,
+            faction: serverPlayer.faction as Faction,
+            gold: 0,
+            units: 0,
+            tiles: [],
+            goldRate: 1,
+            unitRate: serverPlayer.faction === 'Aliens' ? 1 : 0,
+            color: serverPlayer.color,
+            isReady: serverPlayer.isReady,
+            isEliminated: false,
+          };
+        })
+      };
       
     default:
       return state;

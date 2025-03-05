@@ -30,7 +30,9 @@ const io = new Server(server, {
     credentials: true,
     transports: ['websocket', 'polling']
   },
-  allowEIO3: true // Added for compatibility
+  allowEIO3: true, // Added for compatibility
+  pingTimeout: 60000, // Increase ping timeout
+  pingInterval: 25000, // Increase ping interval
 });
 
 // Store active games
@@ -72,6 +74,18 @@ io.on('connection', (socket) => {
     
     console.log(`${playerName} joined the lobby as ${faction}. Total players in lobby: ${lobbyPlayers.length}`);
     console.log(`Current lobby players: ${JSON.stringify(lobbyPlayers.map(p => p.name))}`);
+  });
+  
+  // Add a ping handler to check if connection is alive
+  socket.on('ping', () => {
+    console.log(`Received ping from ${socket.id}`);
+    socket.emit('pong');
+  });
+  
+  // Log when client connects to different namespaces
+  socket.use(([event, ...args], next) => {
+    console.log(`Socket ${socket.id} event: ${event}`, args);
+    next();
   });
   
   // Handle player ready status toggle
