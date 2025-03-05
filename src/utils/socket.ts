@@ -1,9 +1,9 @@
-import { io, Socket } from 'socket.io-client';
+import { io as socketIO, Socket as IOSocket } from 'socket.io-client';
 
 // Determine the server URL based on environment
 const getServerUrl = (): string => {
   // In production, use the same domain
-  if (import.meta.env.PROD) {
+  if (process.env.NODE_ENV === 'production') {
     const url = window.location.origin;
     console.log(`[Socket] Production environment detected, using URL: ${url}`);
     return url;
@@ -14,15 +14,15 @@ const getServerUrl = (): string => {
   return 'http://localhost:8080';
 };
 
-let socket: Socket | null = null;
+let socket: IOSocket | null = null;
 
 // Initialize socket connection
-export const initializeSocket = (): Socket => {
+export const initializeSocket = (): IOSocket => {
   if (!socket) {
     const serverUrl = getServerUrl();
     console.log(`[Socket] Attempting to connect to server at: ${serverUrl}`);
     
-    socket = io(serverUrl, {
+    socket = socketIO(serverUrl, {
       transports: ['websocket', 'polling'],
       autoConnect: true,
       reconnection: true,
@@ -36,14 +36,14 @@ export const initializeSocket = (): Socket => {
       console.log(`[Socket] Connected to server! Socket ID: ${socket?.id}`);
     });
 
-    socket.on('disconnect', (reason) => {
+    socket.on('disconnect', (reason: string) => {
       console.log(`[Socket] Disconnected from server. Reason: ${reason}`);
     });
 
-    socket.on('connect_error', (error) => {
+    socket.on('connect_error', (error: Error) => {
       console.error(`[Socket] Connection error: ${error.message}`);
       // Try to reconnect with polling if websocket fails
-      if (socket.io.opts.transports[0] === 'websocket') {
+      if (socket && socket.io.opts.transports && socket.io.opts.transports[0] === 'websocket') {
         console.log('[Socket] Attempting to reconnect with polling transport');
         socket.io.opts.transports = ['polling', 'websocket'];
       }
@@ -54,7 +54,7 @@ export const initializeSocket = (): Socket => {
 };
 
 // Get the socket instance (creates one if it doesn't exist)
-export const getSocket = (): Socket => {
+export const getSocket = (): IOSocket => {
   if (!socket) {
     return initializeSocket();
   }

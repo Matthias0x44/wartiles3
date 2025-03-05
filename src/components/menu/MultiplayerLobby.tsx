@@ -240,6 +240,14 @@ const DebugInfo = styled.div`
   z-index: 1000;
 `;
 
+interface Player {
+  id: string;
+  name: string;
+  faction: Faction;
+  isReady: boolean;
+  color: string;
+}
+
 const MultiplayerLobby: React.FC = () => {
   const navigate = useNavigate();
   const { state, dispatch } = useGame();
@@ -247,7 +255,7 @@ const MultiplayerLobby: React.FC = () => {
   const [selectedFaction, setSelectedFaction] = useState<Faction | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [hasJoined, setHasJoined] = useState(false);
-  const [lobbyPlayers, setLobbyPlayers] = useState<any[]>([]);
+  const [lobbyPlayers, setLobbyPlayers] = useState<Player[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [socketId, setSocketId] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -273,20 +281,20 @@ const MultiplayerLobby: React.FC = () => {
       socket.emit('ping');
     });
     
-    socket.on('disconnect', (reason) => {
+    socket.on('disconnect', (reason: string) => {
       console.log('[Lobby] Socket disconnected:', reason);
       setIsConnected(false);
       setConnectionError(`Disconnected: ${reason}`);
     });
     
-    socket.on('connect_error', (error) => {
+    socket.on('connect_error', (error: Error) => {
       console.error('[Lobby] Socket connection error:', error.message);
       setIsConnected(false);
       setConnectionError(`Connection error: ${error.message}`);
     });
     
     // Listen for lobby updates
-    socket.on('lobby_update', (data) => {
+    socket.on('lobby_update', (data: { players: Player[] }) => {
       console.log('[Lobby] Lobby update received:', data);
       setLobbyPlayers(data.players);
       
@@ -298,7 +306,7 @@ const MultiplayerLobby: React.FC = () => {
     });
     
     // Listen for game start
-    socket.on('game_started', (data) => {
+    socket.on('game_started', (data: { gameId: string, players: Player[], state: any }) => {
       console.log('[Lobby] Game started:', data);
       // Navigate to game screen
       navigate('/game');

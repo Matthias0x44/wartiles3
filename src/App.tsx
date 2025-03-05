@@ -31,7 +31,7 @@ function App() {
           setSocketInitialized(true);
         });
         
-        socket.on('disconnect', (reason) => {
+        socket.on('disconnect', (reason: string) => {
           console.log('[App] Socket disconnected:', reason);
           
           // If the disconnection is not expected, try to reconnect manually
@@ -46,7 +46,7 @@ function App() {
           }
         });
         
-        socket.on('connect_error', (error) => {
+        socket.on('connect_error', (error: Error) => {
           console.error('[App] Socket connection error:', error);
           setSocketInitialized(false);
         });
